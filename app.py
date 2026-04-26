@@ -10,7 +10,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import serial
-import win32print
+import cups
+import os
 from serial.tools import list_ports
 from svgelements import Path as SvgPath
 from svgelements import SVG, Shape
@@ -152,7 +153,7 @@ class SvgPlotterApp:
             device_frame,
             textvariable=self.transport_var,
             state="readonly",
-            values=["Automatic", "Serial (COM)", "Windows USB/Printer"],
+            values=["Automatic", "Serial (COM)", "Linux USB/Printer"],
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         ttk.Label(device_frame, text="COM port").grid(row=1, column=0, sticky="w", pady=(10, 0))
@@ -346,52 +347,75 @@ class SvgPlotterApp:
         )
 
     def _list_printers(self) -> list[str]:
-        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-        queues = []
-        for info in win32print.EnumPrinters(flags, None, 2):
-            name = info["pPrinterName"] or ""
-            port_name = info["pPortName"] or ""
-            driver_name = info["pDriverName"] or ""
-            if self._is_usb_port(port_name) or "plotter" in name.lower():
-                queues.append(f"{name} [{port_name}] - {driver_name}")
-        return queues
+        try:
+            conn = cups.Connection()
+            printers = conn.getPrinters()
+            queues = []
+            for name, info in printers.items():
+                device_uri = info.get("device-uri", "")
+                driver_name = info.get("printer-make-and-model", "")
+                # USB-s vagy plotter nyomtatók szűrése
+                if self._is_usb_device(device_uri) or "plotter" in name.lower():
+                    # port_name kinyerése az URI-ból (pl. usb://Vendor/Model?serial=XXX)
+                    port_name = device_uri
+                    queues.append(f"{name} [{port_name}] - {driver_name}")
+            return queues
+        except Exception:
+            return []
 
     def _list_usb_ports(self) -> list[str]:
         ports = []
         try:
-            for info in win32print.EnumPorts(None, 2):
-                port_name = info.get("Name", "")
-                if self._is_usb_port(port_name):
-                    ports.append(port_name)
+            # Linux USB serial/printer portok: /dev/usb/lp* és /dev/ttyUSB*
+            for device in os.listdir("/dev"):
+                if re.match(r"ttyUSB\d+", device) or re.match(r"lp\d+", device):
+                    ports.append(f"/dev/{device}")
+            usb_lp_path = "/dev/usb"
+            if os.path.exists(usb_lp_path):
+                for device in os.listdir(usb_lp_path):
+                    if re.match(r"lp\d+", device):
+                        ports.append(f"/dev/usb/{device}")
         except Exception:
             return []
         return sorted(set(ports))
 
     def _is_usb_port(self, port_name: str) -> bool:
-        return bool(re.fullmatch(r"USB\d{3}", (port_name or "").strip(), flags=re.IGNORECASE))
-
+        # Linux USB port minták: /dev/usb/lp0, /dev/ttyUSB0, vagy CUPS usb:// URI
+        port = (port_name or "").strip()
+        return bool(
+            re.match(r"/dev/(usb/)?lp\d+", port) or
+            re.match(r"/dev/ttyUSB\d+", port) or
+            port.startswith("usb://")
+        )
+        
     def create_usb_queue(self) -> None:
         usb_port = self.usb_port_var.get().strip()
         if not usb_port:
             messagebox.showinfo("No USB Port", "Choose a USB port first.")
             return
 
-        queue_name = f"OpenVinylCutter RAW {usb_port}"
-        existing = [entry for entry in self._list_printers() if entry.startswith(queue_name + " [")]
+        # queue_name nem tartalmazhat /-t, lecseréljük _-ra
+        safe_port = usb_port.replace("/", "_")
+        queue_name = f"OpenVinylCutter_RAW_{safe_port}"
+        display_name = f"OpenVinylCutter RAW {usb_port}"
+
+        existing = [entry for entry in self._list_printers() if display_name in entry]
         if existing:
             self.printer_var.set(existing[0])
-            self.transport_var.set("Windows USB/Printer")
+            self.transport_var.set("Linux USB/Printer")
             self.status_var.set(f"USB queue already exists: {queue_name}")
             return
 
-        command = (
-            f"Add-Printer -Name '{queue_name}' "
-            f"-DriverName 'Microsoft enhanced Point and Print compatibility driver' "
-            f"-PortName '{usb_port}'"
-        )
         try:
+            # RAW queue létrehozása CUPS-ban lpadmin-nal
             subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
+                [
+                    "lpadmin",
+                    "-p", queue_name,
+                    "-v", f"usb:{usb_port}",   # pl. usb:/dev/usb/lp0
+                    "-m", "raw",               # RAW = nincs feldolgozás
+                    "-E",                      # enable + accept jobs
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -400,16 +424,17 @@ class SvgPlotterApp:
             details = (exc.stderr or exc.stdout or str(exc)).strip()
             messagebox.showerror(
                 "USB Queue Failed",
-                "Could not create a Windows printer queue.\n\n" + details,
+                "Could not create a CUPS printer queue.\n\n"
+                "Try: sudo usermod -aG lpadmin $USER\n\n" + details,
             )
             return
 
         self.refresh_connections()
         for entry in self._list_printers():
-            if entry.startswith(queue_name + " ["):
+            if queue_name in entry:
                 self.printer_var.set(entry)
                 break
-        self.transport_var.set("Windows USB/Printer")
+        self.transport_var.set("Linux USB/Printer")
         self.status_var.set(f"USB queue created on {usb_port}: {queue_name}")
 
     def load_svg(self) -> None:
@@ -800,7 +825,7 @@ class SvgPlotterApp:
 
             printer_name = self.printer_var.get().split(" [", 1)[0]
             self.status_var.set(
-                f"Sending to {printer_name} via Windows USB/Printer..."
+                f"Sending to {printer_name} via Linux USB/Printer..."
             )
             thread = threading.Thread(
                 target=self._send_printer_worker,
@@ -828,38 +853,29 @@ class SvgPlotterApp:
         return None
 
     def _clear_printer_jobs(self, printer_name: str) -> None:
-        handle = None
         try:
-            handle = win32print.OpenPrinter(printer_name)
-            try:
-                jobs = win32print.EnumJobs(handle, 0, 999, 1)
-            except Exception:
-                jobs = []
-
-            for job in jobs:
-                try:
-                    win32print.SetJob(handle, job["JobId"], 0, None, win32print.JOB_CONTROL_DELETE)
-                except Exception:
-                    continue
-        finally:
-            if handle is not None:
-                try:
-                    win32print.ClosePrinter(handle)
-                except Exception:
-                    pass
+            conn = cups.Connection()
+            jobs = conn.getJobs(which_jobs="not-completed", my_jobs=False)
+            for job_id, job_info in jobs.items():
+                if job_info.get("printer-uri", "").endswith(printer_name) or \
+                   job_info.get("job-printer-uri", "").endswith(printer_name):
+                    try:
+                        conn.cancelJob(job_id, purge_job=True)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     def _clear_openvinylcutter_queues(self) -> None:
-        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
         try:
-            printers = win32print.EnumPrinters(flags, None, 2)
+            conn = cups.Connection()
+            printers = conn.getPrinters()
         except Exception:
             return
-
-        for info in printers:
-            printer_name = info.get("pPrinterName") or ""
+        for printer_name in printers:
             if "OpenVinylCutter RAW" in printer_name:
                 self._clear_printer_jobs(printer_name)
-
+            
     def _send_serial_worker(self, device: str, baudrate: int, hpgl: str) -> None:
         try:
             with serial.Serial(
@@ -896,16 +912,32 @@ class SvgPlotterApp:
         )
 
     def _send_printer_worker(self, printer_name: str, hpgl: str) -> None:
-        handle = None
         try:
             self._clear_openvinylcutter_queues()
-            handle = win32print.OpenPrinter(printer_name)
-            win32print.StartDocPrinter(handle, 1, ("OpenVinylCutter Plot Job", None, "RAW"))
-            win32print.StartPagePrinter(handle)
-            win32print.WritePrinter(handle, hpgl.encode("ascii", errors="ignore"))
-            win32print.EndPagePrinter(handle)
-            win32print.EndDocPrinter(handle)
-        except Exception as exc:  # noqa: BLE001
+            data = hpgl.encode("ascii", errors="ignore")
+
+            if printer_name.startswith("/dev/"):
+                # Közvetlen USB device írás (pl. /dev/usb/lp0)
+                with open(printer_name, "wb") as dev:
+                    dev.write(data)
+
+            else:
+                # CUPS queue-n keresztül (RAW mód – HPGL passthrough)
+                tmp_path = "/tmp/openvinylcutter_job.hpgl"
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+
+                # -o raw = ne dolgozza fel a CUPS, küldje át 1:1
+                result = subprocess.run(
+                    ["lpr", "-P", printer_name, "-o", "raw", tmp_path],
+                    capture_output=True
+                )
+                os.unlink(tmp_path)
+
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.decode())
+
+        except Exception as exc:
             self.root.after(
                 0,
                 lambda: messagebox.showerror(
@@ -919,20 +951,13 @@ class SvgPlotterApp:
                 ),
             )
             return
-        finally:
-            if handle is not None:
-                try:
-                    win32print.ClosePrinter(handle)
-                except Exception:
-                    pass
 
         self.root.after(
             0,
             lambda: self.status_var.set(
-                f"Plot job sent to {printer_name} via Windows USB/Printer."
+                f"Plot job sent to {printer_name} via USB/Printer."
             ),
         )
-
 
 def main() -> None:
     root = tk.Tk()
