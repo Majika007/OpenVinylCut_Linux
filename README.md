@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/729d6c25-6f31-41c8-91c5-2c5c943e956d
 
 <img width="1352" height="698" alt="systemofadown" src="https://github.com/user-attachments/assets/f4d72b1f-88bb-4770-8542-68215346ec32" />
 
-# OpenVinylCutter - Currently only for Windows
+# OpenVinylCutter
 This is a small little thing I made because I got tired of paying for a full 1-year subscription, just to cut some vinyl once in a while.
 **This app aint perfect. Not even close maybe.** But it already works pretty nice for me, so I still wanted to put it on GitHub.
 I hope people that some smart-than-me vinyl cutters, maybe want to test this, tweak this, and help make this project better. Because i could'nt find a good free easy open-sourced software. 
@@ -31,11 +31,15 @@ When installing Python on Windows, make sure to enable:
 If Python is not installed, `start_app.bat` will not work.
 
 ## Installation
-Installation should be pretty simple:
+Installation should be 'easy':
 
-1. Download this repository
-2. Extract it
-3. Run `start_app.bat`
+1. Download this repository: git clone https://github.com/Majika007/OpenVinylCut_Linux
+2. cd OpenVinylCut_Linux
+3. python -m venv venv
+4. source source venv/bin/activate
+5. pip install --upgrade pip
+6. pip install -r requirements.txt
+7. Run: python app.py 
 
 That should install what is needed and start the app.
 
